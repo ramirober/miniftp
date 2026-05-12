@@ -1,14 +1,17 @@
 // signal.c
 
+#include "signals.h"
+
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>    // for strerror()
+#include <sys/wait.h>  // for pid_t
 #include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>   // for pid_t
 
-#include "signals.h"
-#include "session.h"    // for current_sess
-#include "utils.h"      // for close_fd()
+#include "session.h"  // for current_sess
+#include "utils.h"    // for close_fd(), log_msg()
 
 int server_socket = -1;
 
@@ -16,22 +19,20 @@ static void handle_sigint(int sig) {
   (void)sig;
   static volatile sig_atomic_t in_handler = 0;
 
-
   if (in_handler) {
-    fprintf(stderr, "SIGINT handler reentered!\n");
-    return; // Avoid running handler twice concurrently
+    log_msg(LOG_WARNING, "SIGINT handler reentered!");
+    return;  // Avoid running handler twice concurrently
   }
   in_handler = 1;
 
   static int sigint_count = 0;
-  fprintf(stderr, "SIGINT handler called (count = %d) in PID %d\n", ++sigint_count, getpid());
+  log_msg(LOG_INFO, "SIGINT handler called (count = %d) in PID %d", ++sigint_count, getpid());
 
-  printf("[+] SIGINT received. Shutting down...\n");
-  fflush(stdout);
+  log_msg(LOG_INFO, "[+] SIGINT received. Shutting down...");
 
   // Close listening socket
   if (server_socket >= 0) {
-    close_fd(server_socket,"listen socket");
+    close_fd(server_socket, "listen socket");
     server_socket = -1;
   }
 
@@ -40,13 +41,13 @@ static void handle_sigint(int sig) {
   sigemptyset(&blockset);
   sigaddset(&blockset, SIGINT);
   if (sigprocmask(SIG_BLOCK, &blockset, &oldset) < 0) {
-    perror("sigprocmask");
+    log_msg(LOG_ERR, "sigprocmask: %s", strerror(errno));
   }
 
   // Kill entire process group
-  pid_t pgid = getpgrp(); // or getpgid(0)
+  pid_t pgid = getpgrp();  // or getpgid(0)
   if (killpg(pgid, SIGTERM) < 0) {
-    perror("killpg");
+    log_msg(LOG_ERR, "killpg: %s", strerror(errno));
   }
 
   // Reap any children
@@ -54,7 +55,6 @@ static void handle_sigint(int sig) {
 
   // Restore previous signal mask (optional here since we're exiting)
   sigprocmask(SIG_SETMASK, &oldset, NULL);
-
 
   exit(EXIT_SUCCESS);
 }
@@ -65,12 +65,12 @@ static void handle_sigterm(int sig) {
 
   static volatile sig_atomic_t in_handler = 0;
   if (in_handler) {
-    fprintf(stderr, "SIGTERM handler reentered in parent!\n");
+    log_msg(LOG_WARNING, "SIGTERM handler reentered in parent!");
     return;
   }
   in_handler = 1;
 
-  fprintf(stderr, "[+] SIGTERM received in parent. Shutting down (PID %d)...\n", getpid());
+  log_msg(LOG_INFO, "[+] SIGTERM received in parent. Shutting down (PID %d)...", getpid());
 
   // Close listening socket if open
   if (server_socket >= 0) {
@@ -80,9 +80,9 @@ static void handle_sigterm(int sig) {
 
   // Kill all children in process group
   pid_t pgid = getpgrp();
-  fprintf(stderr, "[DEBUG] Sending SIGTERM to (GROUP %d)...\n", (int)pgid);
+  log_msg(LOG_DEBUG, "[DEBUG] Sending SIGTERM to (GROUP %d)...", (int)pgid);
   if (killpg(pgid, SIGTERM) < 0) {
-    perror("killpg (parent)");
+    log_msg(LOG_ERR, "killpg (parent): %s", strerror(errno));
   }
 
   // Reap children
@@ -95,8 +95,7 @@ static void handle_sigterm(int sig) {
 static void handle_sigterm_child(int sig) {
   (void)sig;
 
-  printf("[*] Child PID %d received SIGTERM, cleaning up...\n", getpid());
-  fflush(stdout);
+  log_msg(LOG_INFO, "[*] Child PID %d received SIGTERM, cleaning up...", getpid());
 
   if (current_sess) {
     if (current_sess->control_sock >= 0) {
@@ -115,45 +114,46 @@ static void handle_sigterm_child(int sig) {
 void setup_signals(void) {
   struct sigaction sa;
 
-    // Set parent as group leader
+  // Set parent as group leader
   if (setpgid(0, 0) < 0) {
-    perror("setpgid parent");
+    log_msg(LOG_ERR, "setpgid parent: %s", strerror(errno));
     exit(EXIT_FAILURE);
   }
 
-  printf("[DEBUG] Setting up signal handlers for parent in PID %d with PGID %d\n", getpid(), getpgrp());
+  log_msg(LOG_DEBUG, "[DEBUG] Setting up signal handlers for parent in PID %d with PGID %d",
+          getpid(), getpgrp());
 
   // Setup SIGINT and SIGTERM for parent
 
   sigemptyset(&sa.sa_mask);
   sigaddset(&sa.sa_mask, SIGINT);  // Block SIGINT while handler runs
 
-  sa.sa_flags = SA_RESTART;        // Restart interrupted syscalls
+  sa.sa_flags = SA_RESTART;  // Restart interrupted syscalls
 
   sa.sa_handler = handle_sigint;
 
   // Handle SIGINT
   if (sigaction(SIGINT, &sa, NULL) == -1) {
-    perror("sigaction SIGINT");
+    log_msg(LOG_ERR, "sigaction SIGINT: %s", strerror(errno));
     exit(EXIT_FAILURE);
   }
-  printf("[DEBUG] SIGINT handler installed in PID %d\n", getpid());
+  log_msg(LOG_DEBUG, "[DEBUG] SIGINT handler installed in PID %d", getpid());
 
   // Handle SIGTERM, same mask and flags, but different handler
   sa.sa_handler = handle_sigterm;
 
   if (sigaction(SIGTERM, &sa, NULL) == -1) {
-    perror("sigaction SIGTERM");
+    log_msg(LOG_ERR, "sigaction SIGTERM: %s", strerror(errno));
     exit(EXIT_FAILURE);
   }
 
   // Ignore SIGCHLD to avoid zombie children
   sa.sa_handler = SIG_IGN;
-  sigemptyset(&sa.sa_mask); // Clear mask for SIG_IGN
+  sigemptyset(&sa.sa_mask);  // Clear mask for SIG_IGN
   sa.sa_flags = 0;
 
   if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-    perror("sigaction SIGCHLD");
+    log_msg(LOG_ERR, "sigaction SIGCHLD: %s", strerror(errno));
     exit(EXIT_FAILURE);
   }
 }
@@ -161,22 +161,22 @@ void setup_signals(void) {
 void setup_child_signals(void) {
   struct sigaction sa;
 
-  printf("[DEBUG] Setting up signal handlers for child in PID %d\n", getpid());
+  log_msg(LOG_DEBUG, "[DEBUG] Setting up signal handlers for child in PID %d", getpid());
 
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
   sa.sa_handler = handle_sigterm_child;
 
   if (sigaction(SIGTERM, &sa, NULL) == -1) {
-    perror("sigaction SIGTERM (child)");
+    log_msg(LOG_ERR, "sigaction SIGTERM (child): %s", strerror(errno));
     exit(EXIT_FAILURE);
   }
-  printf("[DEBUG] SIGTERM handler for child installed in PID %d\n", getpid());
+  log_msg(LOG_DEBUG, "[DEBUG] SIGTERM handler for child installed in PID %d", getpid());
 
   // Ignore SIGINT in child so SIGTERM handler can work properly
   sa.sa_handler = SIG_IGN;
   if (sigaction(SIGINT, &sa, NULL) == -1) {
-    perror("sigaction SIGINT (child)");
+    log_msg(LOG_ERR, "sigaction SIGINT (child): %s", strerror(errno));
     exit(EXIT_FAILURE);
   }
 

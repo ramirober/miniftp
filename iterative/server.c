@@ -1,21 +1,23 @@
 #include "server.h"
-#include "utils.h"
-#include "config.h"
-#include "pi.h"
-#include "session.h"
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
-#include <errno.h>
+#include <unistd.h>
+
+#include "config.h"
+#include "pi.h"
+#include "session.h"
+#include "utils.h"
 
 extern int server_socket;
 
-int server_init(const char *ip, int port) {
+int server_init(const char* ip, int port) {
   struct sockaddr_in server_addr;
 
   int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -53,7 +55,7 @@ int server_init(const char *ip, int port) {
     return -1;
   }
 
-  if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+  if (bind(listen_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
     fprintf(stderr, "Bind failed: ");
     perror(NULL);
     close(listen_fd);
@@ -75,17 +77,15 @@ int server_init(const char *ip, int port) {
   return listen_fd;
 }
 
-int server_accept(int listen_fd, struct sockaddr_in *client_addr) {
-
+int server_accept(int listen_fd, struct sockaddr_in* client_addr) {
   // client_addr can be NULL if caller doesn't need client info
   socklen_t addrlen = sizeof(*client_addr);
-  int new_socket = accept(listen_fd, (struct sockaddr *)client_addr, &addrlen);
+  int new_socket = accept(listen_fd, (struct sockaddr*)client_addr, &addrlen);
 
   // EINTR for avoid errors by signal reentry
   // https://stackoverflow.com/questions/41474299/checking-if-errno-eintr-what-does-it-mean
   if (new_socket < 0 && errno != EINTR) {
-    fprintf(stderr, "Accept failed: ");
-    perror(NULL);
+    log_msg(LOG_ERR, "Accept failed: %s", strerror(errno));
     return -1;
   }
 
@@ -93,18 +93,15 @@ int server_accept(int listen_fd, struct sockaddr_in *client_addr) {
 }
 
 void server_loop(int socket) {
-
   // Establish the session socket with the client
   session_init(socket);
 
   // Send initial FTP welcome message
-  if (welcome(current_sess) < 0)
-    return;
+  if (welcome(current_sess) < 0) return;
 
-  while(1) {
+  while (1) {
     // Get command from Control Channel
-    if (getexe_command(current_sess) < 0)
-      break;
+    if (getexe_command(current_sess) < 0) break;
   }
 
   session_cleanup();

@@ -116,8 +116,6 @@ int dtp_send_file(int data_fd, char* path) {
   // Abrimos en solo lectura. FTP por defecto trabaja en modo binario
   int file_fd = open(path, O_RDONLY);
   if (file_fd < 0) {
-    log_msg(LOG_ERR, "dtp_send_file: no se pudo abrir '%s' para %s: %s", path, user ? user : "?",
-            strerror(errno));
     return -1;
   }
 

@@ -3,14 +3,17 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "utils.h"
 
 int check_credentials(char* user, char* pass) {
@@ -44,6 +47,8 @@ int check_credentials(char* user, char* pass) {
 
 // Funcion para abrir la conexion
 int dtp_open_active(ftp_session_t* sess) {
+  // sess es una variable declarada en donde se ejecute dtp_open_active
+  // Y la referenciamos en session.c
   if (!sess) return -1;
 
   // sin_port == 0 marca "PORT aún no recibido en esta sesion"
@@ -98,6 +103,65 @@ int dtp_open_active(ftp_session_t* sess) {
 
   sess->data_sock = fd;
   return fd;
+}
+
+// dtp_send_file manda el contenido del archivo pedido por el socket de
+// datos que entrego dtp_open_active(). Devuelve 0 si la transferencia se
+// completa hasta EOF, y -1 si falla la apertura del archivo, el read() o el
+// write() al socket.
+
+int dtp_send_file(int data_fd, char* path) {
+  if (data_fd < 0 || !path || *path == '\0') return -1;
+
+  // Abrimos en solo lectura. FTP por defecto trabaja en modo binario
+  int file_fd = open(path, O_RDONLY);
+  if (file_fd < 0) {
+    log_msg(LOG_ERR, "dtp_send_file: no se pudo abrir '%s' para %s: %s", path, user ? user : "?",
+            strerror(errno));
+    return -1;
+  }
+
+  // Chequeamos que sea archivo regular. Si nos piden RETR sobre un directorio
+  // o un dispositivo, abortamos antes de empezar a mandar basura por el socket.
+  struct stat st;
+  // Checkeamos con fstat() que sea un archivo regular o que S_ISREG() retorne
+  // true
+  if (fstat(file_fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+    log_msg(LOG_ERR, "dtp_send_file: '%s' no es un archivo regular", path);
+    close(file_fd);
+    return -1;
+  }
+
+  // Loop de transferencia: leemos del archivo y escribimos al socket en
+  // bloques de BUFFER_SIZE bytes. Cortamos cuando read() devuelve 0 (EOF).
+  char buf[BUFFER_SIZE];
+  ssize_t n;
+  while ((n = read(file_fd, buf, sizeof(buf))) > 0) {
+    // write() en un socket puede escribir menos bytes de los pedidos
+    // (escritura parcial). Loopeamos hasta vaciar el buffer leido o hasta
+    // que una escritura falle de verdad.
+    ssize_t written = 0;
+    while (written < n) {
+      ssize_t w = write(data_fd, buf + written, (size_t)(n - written));
+      if (w < 0) {
+        if (errno == EINTR) continue;
+        log_msg(LOG_ERR, "dtp_send_file: write fallo: %s", strerror(errno));
+        close(file_fd);
+        return -1;
+      }
+      written += w;
+    }
+  }
+
+  // n < 0 indica error de lectura del archivo (no EOF, que seria n == 0)
+  if (n < 0) {
+    log_msg(LOG_ERR, "dtp_send_file: read fallo: %s", strerror(errno));
+    close(file_fd);
+    return -1;
+  }
+
+  close(file_fd);
+  return 0;
 }
 
 // Funcion para cerrar la conexion

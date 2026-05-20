@@ -141,13 +141,62 @@ void handle_PORT(const char* args) {
   safe_dprintf(sess->control_sock, MSG_200);
 }
 
-// handle_RETR se encarga de abrir el fichero que se le pasa como argumento
+// handle_RETR se encarga de transferir el fichero solicitado por el cliente
+// a traves del canal de datos previamente configurado con PORT
+// 1) Validaciones previas (login, args, archivo existe) -> 530/501/550
+// 2) 150 anunciando que abrimos el canal de datos
+// 3) abrir canal -> si falla -> 425
+// 4) transferir bytes -> si falla a mitad -> 451
+// 5) cerrar canal y 226
 void handle_RETR(const char* args) {
   ftp_session_t* sess = session_get();
-  (void)args;
-  (void)sess;
+  int fd;
 
-  // Placeholder
+  if (!sess->logged_in) {
+    safe_dprintf(sess->control_sock, MSG_530);
+    return;
+  }
+
+  if (!args || *args == '\0') {  // No hay argumentos
+    safe_dprintf(sess->control_sock, MSG_501);
+    return;
+  }
+
+  // Si el archivo no existe respondemos 550 y ni siquiera tocamos el canal de datos.
+  if (access(args, R_OK) < 0) {
+    safe_dprintf(sess->control_sock, MSG_550, "no existe o sin permisos");
+    return;
+  }
+
+  // Si hay un canal de datos abierto por un PORT previo, cerrarlo.
+  if (sess->data_sock >= 0) {
+    close_fd(sess->data_sock, "previous data socket");
+    sess->data_sock = -1;
+  }
+
+  // Anunciamos al cliente que vamos a abrir el canal de datos.
+  safe_dprintf(sess->control_sock, MSG_150);
+
+  // Apertura del canal. OJO: los parentesis abarcan solo la asignacion,
+  // la comparacion < 0 va POR FUERA. Si quedan adentro como "fd = (... < 0)"
+  // fd termina valiendo 0 o 1 (stdin/stdout), no el FD real del socket.
+  if ((fd = dtp_open_active(sess)) < 0) {
+    safe_dprintf(sess->control_sock, MSG_425);
+    return;
+  }
+
+  // Transferencia propiamente dicha. Si se cae a mitad, MSG_451 y limpiamos
+  // el canal con dtp_close para no dejar el socket colgado en la sesion
+  if (dtp_send_file(fd, (char*)args) < 0) {
+    safe_dprintf(sess->control_sock, MSG_451);
+    dtp_close(sess);
+    return;
+  }
+
+  // Transferencia OK: cerramos el canal de datos (esto le indica EOF al
+  // cliente) y recien ahi mandamos el 226 final por el canal de control.
+  dtp_close(sess);
+  safe_dprintf(sess->control_sock, MSG_226);
 }
 
 // handle_STOR se encarga de guardar el fichero que se le pasa como argumento

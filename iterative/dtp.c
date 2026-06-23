@@ -162,6 +162,54 @@ int dtp_send_file(int data_fd, char* path) {
   return 0;
 }
 
+// dtp_recv_file es el espejo de dtp_send_file: recibe bytes desde el socket de
+// datos que entrego dtp_open_active() y los escribe al archivo destino.
+// Devuelve 0 si la transferencia se completa hasta EOF (el cliente cierra su
+// extremo del canal), y -1 si falla la apertura/creacion del archivo o el
+// write() local. Abre con O_TRUNC: si el archivo ya existe, lo sobrescribe.
+int dtp_recv_file(int data_fd, char* path) {
+  if (data_fd < 0 || !path || *path == '\0') return -1;
+
+  // O_CREAT lo crea si no existe; O_TRUNC lo vacia si ya existia (sobrescribe).
+  // Permisos 0644 (rw-r--r--), sujetos al umask del proceso.
+  int file_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (file_fd < 0) {
+    log_msg(LOG_ERR, "dtp_recv_file: no se pudo abrir '%s': %s", path, strerror(errno));
+    return -1;
+  }
+
+  // Loop de recepcion: leemos del socket y escribimos al archivo en bloques de
+  // BUFFER_SIZE bytes. Cortamos cuando read() devuelve 0 (el cliente cerro el
+  // canal de datos = fin de la transferencia).
+  char buf[BUFFER_SIZE];
+  ssize_t n;
+  while ((n = read(data_fd, buf, sizeof(buf))) > 0) {
+    // write() puede escribir menos bytes de los pedidos; loopeamos hasta
+    // vaciar el buffer o hasta que una escritura falle de verdad.
+    ssize_t written = 0;
+    while (written < n) {
+      ssize_t w = write(file_fd, buf + written, (size_t)(n - written));
+      if (w < 0) {
+        if (errno == EINTR) continue;
+        log_msg(LOG_ERR, "dtp_recv_file: write fallo: %s", strerror(errno));
+        close(file_fd);
+        return -1;
+      }
+      written += w;
+    }
+  }
+
+  // n < 0 indica error de lectura del socket (no EOF, que seria n == 0)
+  if (n < 0) {
+    log_msg(LOG_ERR, "dtp_recv_file: read fallo: %s", strerror(errno));
+    close(file_fd);
+    return -1;
+  }
+
+  close(file_fd);
+  return 0;
+}
+
 // Funcion para cerrar la conexion
 void dtp_close(ftp_session_t* sess) {
   if (!sess) return;

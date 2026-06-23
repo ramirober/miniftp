@@ -66,12 +66,25 @@ void handle_SYST(const char* args) {
   safe_dprintf(sess->control_sock, MSG_215);  // 215 <system type>
 }
 
+// handle_TYPE fija el tipo de representacion. La transferencia real siempre es
+// binaria (ver dtp_send_file/dtp_recv_file), asi que esto es protocolar:
+// aceptamos I (image/binary) y A (ASCII) con 200, y rechazamos el resto con 504.
 void handle_TYPE(const char* args) {
   ftp_session_t* sess = session_get();
-  (void)args;
-  (void)sess;
 
-  // Placeholder
+  if (!args || *args == '\0') {
+    safe_dprintf(sess->control_sock, MSG_501);
+    return;
+  }
+
+  // El cliente manda "I", "A", o con formato "L 8" / "A N"; nos quedamos con el
+  // primer caracter, que es el codigo de tipo.
+  char type = args[0];
+  if (type == 'I' || type == 'i' || type == 'A' || type == 'a') {
+    safe_dprintf(sess->control_sock, MSG_200);
+  } else {
+    safe_dprintf(sess->control_sock, MSG_504);
+  }
 }
 
 // handle_PORT se encarga de establecer el puerto de datos para la conexion
@@ -199,20 +212,59 @@ void handle_RETR(const char* args) {
   safe_dprintf(sess->control_sock, MSG_226);
 }
 
-// handle_STOR se encarga de guardar el fichero que se le pasa como argumento
+// handle_STOR es el espejo de handle_RETR: recibe el fichero que el cliente
+// envia por el canal de datos y lo guarda en el directorio actual del servidor.
+// 1) Validaciones previas (login, args) -> 530/501
+// 2) 150 anunciando que abrimos el canal de datos
+// 3) abrir canal -> si falla -> 425
+// 4) recibir bytes -> si falla a mitad -> 451
+// 5) cerrar canal y 226
 void handle_STOR(const char* args) {
   ftp_session_t* sess = session_get();
-  (void)args;
-  (void)sess;
+  int fd;
 
-  // Placeholder
+  if (!sess->logged_in) {
+    safe_dprintf(sess->control_sock, MSG_530);
+    return;
+  }
+
+  if (!args || *args == '\0') {  // No hay argumentos
+    safe_dprintf(sess->control_sock, MSG_501);
+    return;
+  }
+
+  // Si hay un canal de datos abierto por un PORT previo, cerrarlo.
+  if (sess->data_sock >= 0) {
+    close_fd(sess->data_sock, "previous data socket");
+    sess->data_sock = -1;
+  }
+
+  // Anunciamos al cliente que vamos a abrir el canal de datos.
+  safe_dprintf(sess->control_sock, MSG_150);
+
+  // Apertura del canal (mismo modo activo que RETR).
+  if ((fd = dtp_open_active(sess)) < 0) {
+    safe_dprintf(sess->control_sock, MSG_425);
+    return;
+  }
+
+  // Recepcion. Si falla la apertura del archivo o la transferencia se cae a
+  // mitad, MSG_451 y limpiamos el canal con dtp_close.
+  if (dtp_recv_file(fd, (char*)args) < 0) {
+    safe_dprintf(sess->control_sock, MSG_451);
+    dtp_close(sess);
+    return;
+  }
+
+  // Transferencia OK: cerramos el canal de datos y mandamos el 226 final.
+  dtp_close(sess);
+  safe_dprintf(sess->control_sock, MSG_226);
 }
 
 // handle_NOOP se encarga de hacer un "ping" al servidor (NOOP es no-operation)
 void handle_NOOP(const char* args) {
   ftp_session_t* sess = session_get();
-  (void)args;
-  (void)sess;
+  (void)args;  // unused
 
-  // Placeholder
+  safe_dprintf(sess->control_sock, MSG_200);  // 200 Command okay.
 }

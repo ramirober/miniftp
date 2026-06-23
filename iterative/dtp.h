@@ -9,5 +9,6 @@ int check_credentials(char* user, char* pass);
 int dtp_open_active(ftp_session_t* sess);
 // TODO: Agregar parametro user para resolver logging/chroot
 int dtp_send_file(int fd, char* file);
+int dtp_recv_file(int fd, char* file);
 
 void dtp_close(ftp_session_t* sess);

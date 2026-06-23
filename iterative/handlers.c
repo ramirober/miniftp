@@ -13,6 +13,15 @@
 #include "session.h"
 #include "utils.h"
 
+// is_safe_path acota los nombres de archivo de RETR/STOR a un basename dentro
+// del directorio actual del servidor y rechaza directorios arbitrarios y que no se deberian usar
+static int is_safe_path(const char* p) {
+  if (!p || *p == '\0') return 0;
+  if (strchr(p, '/')) return 0;   // sin rutas absolutas ni subdirectorios
+  if (strstr(p, "..")) return 0;  // sin traversal/puntos de montaje
+  return 1;
+}
+
 void handle_USER(const char* args) {
   ftp_session_t* sess = session_get();
 
@@ -175,6 +184,12 @@ void handle_RETR(const char* args) {
     return;
   }
 
+  // Solo permitimos un basename en el cwd
+  if (!is_safe_path(args)) {
+    safe_dprintf(sess->control_sock, MSG_553);  // File name not allowed
+    return;
+  }
+
   // Si el archivo no existe respondemos 550 y ni siquiera tocamos el canal de datos.
   if (access(args, R_OK) < 0) {
     safe_dprintf(sess->control_sock, MSG_550, "no existe o sin permisos");
@@ -230,6 +245,12 @@ void handle_STOR(const char* args) {
 
   if (!args || *args == '\0') {  // No hay argumentos
     safe_dprintf(sess->control_sock, MSG_501);
+    return;
+  }
+
+  // Solo permitimos un basename en el cwd
+  if (!is_safe_path(args)) {
+    safe_dprintf(sess->control_sock, MSG_553);  // File name not allowed
     return;
   }
 
